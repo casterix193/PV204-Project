@@ -52,7 +52,7 @@ public class Main {
             verifyDefaultPin(cardManager);
             runGenerateAndDeriveKeyTest(cardManager);
             runLoadCustomKeyTest(cardManager);
-            runDeterministicDerivationTest(cardManager);
+            runHierarchicalDerivationTest(cardManager); // Add the new test
             runPinTest(cardManager);
 
         } catch(Exception e) {
@@ -203,70 +203,97 @@ public class Main {
         }
     }
 
-    private static void runDeterministicDerivationTest(CardManager cardManager) {
+    private static void runHierarchicalDerivationTest(CardManager cardManager) {
         try {
-            System.out.println("\nTEST 3: Verify deterministic key derivation");
+            System.out.println("\nTEST 3: Hierarchical Key Derivation");
 
-            byte[] deterministicKey = new byte[32];
-            for (int i = 0; i < deterministicKey.length; i++) {
-                deterministicKey[i] = (byte)0x11;
+            // Load a predictable master key
+            byte[] testMasterKey = new byte[32];
+            for (int i = 0; i < testMasterKey.length; i++) {
+                testMasterKey[i] = (byte)0x44;
             }
 
-            // Load key
-            CommandAPDU loadKeyApdu = new CommandAPDU(CLA_BYTE, INS_LOAD_MASTER_KEY, 0x01, 0x00, deterministicKey);
+            CommandAPDU loadKeyApdu = new CommandAPDU(CLA_BYTE, INS_LOAD_MASTER_KEY, 0x00, 0x00, testMasterKey);
             ResponseAPDU loadResponse = cardManager.transmit(loadKeyApdu);
-            boolean loadSuccess = checkStatusWord(loadResponse, SW_SUCCESS);
-            addTestResult("Load Deterministic Key", loadSuccess, null);
 
-            if (!loadSuccess) return;
-
-            // First derivation
-            CommandAPDU deriveCommand1 = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x01, 0x00, new byte[]{0x01});
-            ResponseAPDU firstDerive = cardManager.transmit(deriveCommand1);
-            boolean firstDeriveSuccess = checkStatusWord(firstDerive, SW_SUCCESS);
-
-            if (!firstDeriveSuccess) {
-                addTestResult("First Derivation", false, "Failed with SW: 0x" +
-                        Integer.toHexString(firstDerive.getSW()));
+            if (!checkStatusWord(loadResponse, SW_SUCCESS)) {
+                addTestResult("Hierarchical Derivation - Setup", false, "Failed to load test master key");
                 return;
             }
 
-            // Second derivation (same index)
-            ResponseAPDU secondDerive = cardManager.transmit(deriveCommand1);
-            boolean secondDeriveSuccess = checkStatusWord(secondDerive, SW_SUCCESS);
+            // Test various paths and collect results
+            byte[][] testPaths = {
+                    {1},             // m/1
+                    {2},             // m/2
+                    {1, 1},          // m/1/1
+                    {1, 2},          // m/1/2
+                    {2, 1},          // m/2/1
+                    {1, 1, 1, 1, 1}  // m/1/1/1/1/1 - deeper path
+            };
 
-            if (!secondDeriveSuccess) {
-                addTestResult("Second Derivation", false, "Failed with SW: 0x" +
-                        Integer.toHexString(secondDerive.getSW()));
-                return;
+            // Store derived keys for comparison
+            byte[][] derivedKeys = new byte[testPaths.length][];
+
+            // Test each path
+            for (int i = 0; i < testPaths.length; i++) {
+                String pathStr = pathToString(testPaths[i]);
+                CommandAPDU deriveCommand = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x00, 0x00, testPaths[i]);
+                ResponseAPDU response = cardManager.transmit(deriveCommand);
+
+                if (checkStatusWord(response, SW_SUCCESS)) {
+                    derivedKeys[i] = response.getData();
+                    addTestResult("Derive " + pathStr, true,
+                            "Key: " + Util.toHex(response.getData()).substring(0, 16) + "...");
+                } else {
+                    addTestResult("Derive " + pathStr, false,
+                            "Failed with SW: 0x" + Integer.toHexString(response.getSW()));
+                }
             }
 
-            // Check if identical
-            boolean areEqual = java.util.Arrays.equals(firstDerive.getData(), secondDerive.getData());
-            addTestResult("Deterministic Key Derivation", areEqual,
-                    areEqual ? "Same index produced identical keys" :
-                            "Same index produced different keys");
+            // Verify determinism by deriving same paths again
+            for (int i = 0; i < testPaths.length; i++) {
+                String pathStr = pathToString(testPaths[i]);
+                CommandAPDU deriveCommand = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x00, 0x00, testPaths[i]);
+                ResponseAPDU response = cardManager.transmit(deriveCommand);
 
-            // Different index derivation
-            CommandAPDU deriveCommand2 = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x01, 0x00, new byte[]{0x02});
-            ResponseAPDU differentDerive = cardManager.transmit(deriveCommand2);
-            boolean diffDeriveSuccess = checkStatusWord(differentDerive, SW_SUCCESS);
-
-            if (!diffDeriveSuccess) {
-                addTestResult("Different Index Derivation", false, "Failed with SW: 0x" +
-                        Integer.toHexString(differentDerive.getSW()));
-                return;
+                if (checkStatusWord(response, SW_SUCCESS)) {
+                    boolean areEqual = java.util.Arrays.equals(derivedKeys[i], response.getData());
+                    addTestResult("Deterministic " + pathStr, areEqual,
+                            areEqual ? "Same path produced identical keys" : "FAILED: Same path produced different keys");
+                }
             }
 
-            // Check if different
-            boolean areDifferent = !java.util.Arrays.equals(firstDerive.getData(), differentDerive.getData());
-            addTestResult("Different Index Derivation", areDifferent,
-                    areDifferent ? "Different indices produced different keys" :
-                            "Different indices incorrectly produced identical keys");
+            // Compare keys from different paths to ensure uniqueness
+            System.out.println("\nKey uniqueness verification:");
+            for (int i = 0; i < derivedKeys.length; i++) {
+                for (int j = i + 1; j < derivedKeys.length; j++) {
+                    if (derivedKeys[i] != null && derivedKeys[j] != null) {
+                        boolean areEqual = java.util.Arrays.equals(derivedKeys[i], derivedKeys[j]);
+                        String pathI = pathToString(testPaths[i]);
+                        String pathJ = pathToString(testPaths[j]);
+
+                        addTestResult("Uniqueness " + pathI + " vs " + pathJ, !areEqual,
+                                areEqual ? "FAILED: Different paths produced identical keys" :
+                                        "Different paths correctly produced different keys");
+                    }
+                }
+            }
+
         } catch (Exception e) {
-            addTestResult("Deterministic Derivation Test", false, "Exception: " + e.getMessage());
+            addTestResult("Hierarchical Derivation Test", false, "Exception: " + e.getMessage());
         }
     }
+
+    // Helper method to convert path array to string representation
+    private static String pathToString(byte[] path) {
+        StringBuilder sb = new StringBuilder("m");
+        for (byte b : path) {
+            sb.append("/").append(Byte.toUnsignedInt(b));
+        }
+        return sb.toString();
+    }
+
+
 
     private static void runPinTest(CardManager cardManager) {
         try {

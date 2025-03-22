@@ -13,6 +13,7 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
     private static final byte INS_VERIFY_PIN = (byte) 0x20;
     private static final byte INS_CHANGE_PIN = (byte) 0x21;
 
+    private static final byte MAX_DERIVATION_PATH_LENGTH = (byte) 10;
     private static final byte MASTER_KEY_LENGTH = (byte) 32;
 
     private static final byte PIN_TRY_LIMIT = (byte) 5;
@@ -98,17 +99,49 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
         // Copy key data from buffer to masterKey
         Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, masterKey, (short) 0, MASTER_KEY_LENGTH);
     }
-    
+
+
+    /**
+     * Derive a key from the master key using a derivation path
+     * Algorithm:
+     *  Start with master key
+     *  For each index in path:
+     *      Take current key + index
+     *      Hash them together with SHA
+     *      Use result as new key for next level
+     */
     private void deriveKey(APDU apdu) {
         if (masterKey == null) {
             ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
         }
 
         byte[] buffer = apdu.getBuffer();
-        byte derivationIndex = buffer[ISO7816.OFFSET_CDATA];
-        sha.reset();
-        sha.update(masterKey, (short) 0, (short) masterKey.length);
-        sha.doFinal(new byte[]{ derivationIndex }, (short) 0, (short) 1, derivedKey, (short) 0);
+        short bytesRead = apdu.setIncomingAndReceive();
+
+        // Check that we have at least one index
+        if (bytesRead < 1) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        // Limit path length for security
+        if (bytesRead > MAX_DERIVATION_PATH_LENGTH) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        // Start with the master key
+        Util.arrayCopyNonAtomic(masterKey, (short) 0, derivedKey, (short) 0, (short) masterKey.length);
+
+        // For each level in the path, derive a new key
+        for (short i = 0; i < bytesRead; i++) {
+            byte pathIndex = buffer[(short)(ISO7816.OFFSET_CDATA + i)];
+
+            // Use current derivedKey + pathIndex to generate next level
+            sha.reset();
+            sha.update(derivedKey, (short) 0, (short) derivedKey.length);
+            sha.doFinal(new byte[]{ pathIndex }, (short) 0, (short) 1, derivedKey, (short) 0);
+        }
+
+        // Send derived key as response
         apdu.setOutgoing();
         apdu.setOutgoingLength((short) derivedKey.length);
         apdu.sendBytesLong(derivedKey, (short) 0, (short) derivedKey.length);
