@@ -13,7 +13,7 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
     private static final byte INS_VERIFY_PIN = (byte) 0x20;
     private static final byte INS_CHANGE_PIN = (byte) 0x21;
 
-    private static final byte MAX_DERIVATION_PATH_LENGTH = (byte) 10;
+    private static final byte MAX_DERIVATION_PATH_LENGTH = (byte) 16;
     private static final byte MASTER_KEY_LENGTH = (byte) 32;
 
     private static final byte PIN_TRY_LIMIT = (byte) 5;
@@ -26,16 +26,6 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
     private byte[] derivedKey;
     private MessageDigest sha;
 
-    private AESKey aesKey;
-    private Cipher aesCipher;
-    private byte[] aesKeyData = {
-        (byte) 0x01, (byte) 0x02, (byte) 0x03, (byte) 0x04,
-        (byte) 0x05, (byte) 0x06, (byte) 0x07, (byte) 0x08,
-        (byte) 0x09, (byte) 0x0A, (byte) 0x0B, (byte) 0x0C,
-        (byte) 0x0D, (byte) 0x0E, (byte) 0x0F, (byte) 0x10
-    };
-
-
     public JavaCardApplet() {
         masterKey = new byte[MASTER_KEY_LENGTH];
         derivedKey = new byte[32];
@@ -46,11 +36,6 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
         pin = new OwnerPIN(PIN_TRY_LIMIT, PIN_SIZE);
         byte[] defaultPin = {0x31, 0x32, 0x33, 0x34}; // "1234"
         pin.update(defaultPin, (short) 0, PIN_SIZE);
-        
-        aesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
-        aesKey.setKey(aesKeyData, (short) 0);
-        aesCipher = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_ECB_NOPAD, false);
-
         register();
     }
 
@@ -85,10 +70,6 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
                 checkPinValidated();
                 loadMasterKey(apdu);
                 sendSuccessResponse(apdu);
-                break;
-            case (byte) 0xA1: 
-                checkPinValidated();
-                decryptSecureMessage(apdu);
                 break;
             default:
                 ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -198,18 +179,6 @@ public class JavaCardApplet extends Applet implements MultiSelectable {
         pin.update(buffer, ISO7816.OFFSET_CDATA, PIN_SIZE);
         sendSuccessResponse(apdu);
     }
-
-    private void decryptSecureMessage(APDU apdu) {
-        byte[] buffer = apdu.getBuffer();
-        short bytesRead = apdu.setIncomingAndReceive();
-
-        // Decrypt data
-        aesCipher.init(aesKey, Cipher.MODE_DECRYPT);
-        aesCipher.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRead, buffer, (short) 0);
-
-        apdu.setOutgoingAndSend((short) 0, bytesRead);
-    }
-
 
     public boolean select(boolean appInstAlreadyActive) {
         return true;

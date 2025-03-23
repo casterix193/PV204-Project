@@ -8,9 +8,7 @@ import cardtools.CardManager;
 import cardtools.RunConfig;
 import cardtools.Util;
 import applets.JavaCardApplet;
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
-import java.util.Arrays;
+import host.SecureChannel;
 
 public class Main {
     // Constants
@@ -112,15 +110,7 @@ public class Main {
             System.out.println("\nALL TESTS PASSED!");
         }
     }
-    
-    private static final byte[] AES_KEY = {
-        (byte) 0x01, (byte) 0x02, (byte) 0x03, (byte) 0x04,
-        (byte) 0x05, (byte) 0x06, (byte) 0x07, (byte) 0x08,
-        (byte) 0x09, (byte) 0x0A, (byte) 0x0B, (byte) 0x0C,
-        (byte) 0x0D, (byte) 0x0E, (byte) 0x0F, (byte) 0x10
-    };
 
-    
     private static CardManager setupCardManager() throws Exception {
         byte[] aidBytes = Util.hexStringToByteArray(APPLET_AID);
         CardManager cardManager = new CardManager(true, aidBytes);
@@ -136,13 +126,6 @@ public class Main {
         System.out.println("Connected.");
 
         return cardManager;
-    }
-
-    private static byte[] encryptData(byte[] data) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(AES_KEY, "AES"));
-
-        return cipher.doFinal(Arrays.copyOf(data, 16)); 
     }
 
     private static void verifyDefaultPin(CardManager cardManager) {
@@ -177,13 +160,15 @@ public class Main {
                     generateSuccess ? null : "Expected SW: 0x" + Integer.toHexString(SW_SUCCESS) +
                             ", Got: 0x" + Integer.toHexString(responseGenerate.getSW()));
 
-            // Derive key
-            byte[] plaintext = new byte[]{0x00}; // Data to send
-            byte[] encryptedData = encryptData(plaintext); 
+            SecureChannel sc = new SecureChannel();
+            byte[] plaintext = new byte[]{0x00}; 
+            byte[] encryptedData = sc.encrypt(plaintext);
+            // Derive Key
+            CommandAPDU deriveCommandApdu = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x01, 0x00, encryptedData);
 
-            CommandAPDU deriveCommandApdu = new CommandAPDU(CLA_BYTE, (byte) 0xA1, 0x00, 0x00, encryptedData);
             ResponseAPDU responseDerive = cardManager.transmit(deriveCommandApdu);
-            System.out.println("Derive key response: " + Util.toHex(responseDerive.getBytes()));
+            byte[] decryptedResponse = sc.decrypt(responseDerive.getData());
+            System.out.println("Decrypted Derived Key: " + Util.toHex(decryptedResponse));
 
             boolean deriveSuccess = checkStatusWord(responseDerive, SW_SUCCESS) && responseDerive.getData().length == 32;
             addTestResult("Derive Key", deriveSuccess,
