@@ -2,6 +2,9 @@ package host;
 
 import javax.smartcardio.CommandAPDU;
 import javax.smartcardio.ResponseAPDU;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.security.spec.ECPublicKeySpec;
 import java.util.ArrayList;
 import java.util.List;
 import cardtools.CardManager;
@@ -12,6 +15,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 import java.util.Arrays;
 
+
 public class Main {
     // Constants
     private static final byte CLA_BYTE = (byte) 0xB0;
@@ -20,6 +24,7 @@ public class Main {
     private static final byte INS_DERIVE_KEY = (byte) 0x55;
     private static final byte INS_GENERATE_MASTER_KEY = (byte) 0x56;
     private static final byte INS_LOAD_MASTER_KEY = (byte) 0x57;
+    private static final byte INS_SIGN_DATA = (byte) 0x59;
 
     // Default PIN "1234" in bytes
     private static final byte[] DEFAULT_PIN = {0x31, 0x32, 0x33, 0x34};
@@ -53,10 +58,11 @@ public class Main {
 
             // Run tests
             verifyDefaultPin(cardManager);
-            runGenerateAndDeriveKeyTest(cardManager);
-            runLoadCustomKeyTest(cardManager);
-            runHierarchicalDerivationTest(cardManager); // Add the new test
-            runPinTest(cardManager);
+            runSigningTest(cardManager);
+            //runGenerateAndDeriveKeyTest(cardManager);
+            //runLoadCustomKeyTest(cardManager);
+            //runHierarchicalDerivationTest(cardManager); // Add the new test
+            //runPinTest(cardManager);
 
         } catch(Exception e) {
             addTestResult("Setup", false, "Fatal error: " + e.getMessage());
@@ -145,6 +151,138 @@ public class Main {
         return cipher.doFinal(Arrays.copyOf(data, 16)); 
     }
 
+    private static void runSigningTest(CardManager cardManager) {
+        try {
+            System.out.println("\nTEST 4: Signing with derived keys");
+
+            // Load a predictable master key
+            byte[] testMasterKey = new byte[64];
+            Arrays.fill(testMasterKey, (byte)0x44);
+            CommandAPDU loadKeyApdu = new CommandAPDU(CLA_BYTE, INS_LOAD_MASTER_KEY, 0x00, 0x00, testMasterKey);
+            ResponseAPDU response = cardManager.transmit(loadKeyApdu);
+            if (!checkStatusWord(response, SW_SUCCESS)) {
+                addTestResult("Signing Test - Setup", false, "Failed to load test master key");
+                return;
+            }
+
+            // Test paths and test data
+            byte[][] paths = {
+                    {1},    // m/1
+                    {1, 2}  // m/1/2
+            };
+            byte[] dataToSign = "Hello, world!".getBytes();
+
+            // For each path: derive key, get public key, sign data, verify signature
+            for (byte[] path : paths) {
+                String pathStr = pathToString(path);
+
+                // 1. Get public key for this path
+                CommandAPDU deriveCmd = new CommandAPDU(CLA_BYTE, INS_DERIVE_KEY, 0x00, 0x00, path);
+                response = cardManager.transmit(deriveCmd);
+                if (!checkStatusWord(response, SW_SUCCESS)) {
+                    addTestResult("Sign+Verify " + pathStr, false, "Failed to derive key");
+                    continue;
+                }
+
+                byte[] responseData = response.getData();
+                byte[] publicKey = Arrays.copyOfRange(responseData, 0, 65); // First 65 bytes = pubkey
+
+                // 2. Sign data with this path
+                System.out.println("\nSigning data with path " + pathStr);
+                ByteArrayOutputStream signData = new ByteArrayOutputStream();
+                signData.write(path.length);           // Path length
+                signData.write(path);                  // Path indices
+                signData.write(dataToSign);            // Data to sign (no length prefix)
+
+                CommandAPDU signCmd = new CommandAPDU(CLA_BYTE, INS_SIGN_DATA, 0x00, 0x00, signData.toByteArray());
+                response = cardManager.transmit(signCmd);
+
+                if (!checkStatusWord(response, SW_SUCCESS)) {
+                    addTestResult("Sign+Verify " + pathStr, false,
+                            "Failed to sign with SW: 0x" + Integer.toHexString(response.getSW()));
+                    continue;
+                }
+
+                byte[] signature = response.getData();
+                addTestResult("Sign " + pathStr, true, "Signature length: " + signature.length);
+
+                // 3. Verify signature (simpler approach)
+                try {
+                    boolean verified = verifySignature(dataToSign, signature, publicKey);
+                    addTestResult("Verify " + pathStr, verified,
+                            verified ? "Signature verified successfully" : "Signature verification failed");
+                } catch (Exception e) {
+                    addTestResult("Verify " + pathStr, false, "Verification exception: " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            addTestResult("Signing Test", false, "Exception: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private static boolean verifySignature(byte[] data, byte[] signature, byte[] publicKey) throws Exception {
+        ECPublicKeySpec keySpec = getEcPublicKeySpec(publicKey);
+        java.security.KeyFactory keyFactory = java.security.KeyFactory.getInstance("EC");
+        java.security.PublicKey pubKey = keyFactory.generatePublic(keySpec);
+
+
+        java.security.Signature ecdsaVerify = java.security.Signature.getInstance("SHA256withECDSA");
+        ecdsaVerify.initVerify(pubKey);
+        ecdsaVerify.update(data);
+
+        try {
+            return ecdsaVerify.verify(signature);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+
+    private static ECPublicKeySpec getEcPublicKeySpec(byte[] publicKey) {
+        if (publicKey[0] != 0x04 || publicKey.length != 65) {
+            throw new IllegalArgumentException("Expected uncompressed public key (0x04|X|Y)");
+        }
+
+        // Extract X and Y coordinates
+        byte[] x = Arrays.copyOfRange(publicKey, 1, 33);
+        byte[] y = Arrays.copyOfRange(publicKey, 33, 65);
+
+        // Create EC point and public key
+        java.security.spec.ECPoint point = new java.security.spec.ECPoint(
+                new java.math.BigInteger(1, x),
+                new java.math.BigInteger(1, y));
+
+        // Get secp256k1 parameters
+        java.security.spec.ECParameterSpec params = getSecp256k1Params();
+        ECPublicKeySpec keySpec = new ECPublicKeySpec(point, params);
+        return keySpec;
+    }
+
+    // Keep the getSecp256k1Params method as before
+    private static java.security.spec.ECParameterSpec getSecp256k1Params() {
+        // These values are from the secp256k1 curve specification
+        String pHex = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F";
+        String aHex = "0000000000000000000000000000000000000000000000000000000000000000";
+        String bHex = "0000000000000000000000000000000000000000000000000000000000000007";
+        String gxHex = "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
+        String gyHex = "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8";
+        String nHex = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
+
+        java.math.BigInteger p = new java.math.BigInteger(pHex, 16);
+        java.math.BigInteger a = new java.math.BigInteger(aHex, 16);
+        java.math.BigInteger b = new java.math.BigInteger(bHex, 16);
+        java.math.BigInteger gx = new java.math.BigInteger(gxHex, 16);
+        java.math.BigInteger gy = new java.math.BigInteger(gyHex, 16);
+        java.math.BigInteger n = new java.math.BigInteger(nHex, 16);
+
+        java.security.spec.ECFieldFp field = new java.security.spec.ECFieldFp(p);
+        java.security.spec.EllipticCurve curve = new java.security.spec.EllipticCurve(field, a, b);
+        java.security.spec.ECPoint g = new java.security.spec.ECPoint(gx, gy);
+
+        return new java.security.spec.ECParameterSpec(curve, g, n, 1);
+    }
+
     private static void verifyDefaultPin(CardManager cardManager) {
         try {
             System.out.println("\nVerifying PIN before executing tests...");
@@ -198,11 +336,9 @@ public class Main {
         try {
             System.out.println("\nTEST 2: Load custom key and derive");
 
-            byte[] customKey = new byte[32];
-            for (int i = 0; i < customKey.length; i++) {
-                customKey[i] = (byte)0x33;
-            }
-
+            byte[] customKey = new byte[64];
+            Arrays.fill(customKey, (byte) 0x33);
+            verifyDefaultPin(cardManager);
             CommandAPDU loadKeyApdu = new CommandAPDU(CLA_BYTE, INS_LOAD_MASTER_KEY, 0x01, 0x00, customKey);
             ResponseAPDU responseLoad = cardManager.transmit(loadKeyApdu);
             System.out.println("Load key response: " + Util.toHex(responseLoad.getBytes()));
