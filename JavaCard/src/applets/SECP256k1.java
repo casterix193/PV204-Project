@@ -39,7 +39,7 @@ public class SECP256k1 {
             (byte)0xFD,(byte)0x17,(byte)0xB4,(byte)0x48,(byte)0xA6,(byte)0x85,(byte)0x54,(byte)0x19,
             (byte)0x9C,(byte)0x47,(byte)0xD0,(byte)0x8F,(byte)0xFB,(byte)0x10,(byte)0xD4,(byte)0xB8
     };
-    static final byte SECP256K1_R[] = {
+    public static final byte SECP256K1_R[] = {
             (byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,
             (byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFE,
             (byte)0xBA,(byte)0xAE,(byte)0xDC,(byte)0xE6,(byte)0xAF,(byte)0x48,(byte)0xA0,(byte)0x3B,
@@ -102,7 +102,7 @@ public class SECP256k1 {
      * @param pubOff the offset in pubOut
      * @return the length of the public key
      */
-    short derivePublicKey(byte[] privateKey, short privOff, byte[] pubOut, short pubOff) {
+    public short derivePublicKey(byte[] privateKey, short privOff, byte[] pubOut, short pubOff) {
         tmpECPrivateKey.setS(privateKey, privOff, (short)(SECP256K1_KEY_SIZE/8));
         return derivePublicKey(tmpECPrivateKey, pubOut, pubOff);
     }

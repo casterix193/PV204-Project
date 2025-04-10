@@ -1,9 +1,6 @@
 package applets;
 
-import applets.jcmathlib.BigNat;
-import applets.jcmathlib.ECCurve;
-import applets.jcmathlib.ECPoint;
-import applets.jcmathlib.ResourceManager;
+import applets.jcmathlib.*;
 import applets.jcmathlib.curves.SecP256k1;
 import javacard.framework.*;
 import javacard.security.*;
@@ -149,6 +146,7 @@ public class KeycardApplet extends Applet {
     private BigNat order, identityPriv, noncePriv, signature;
     private ECPoint identityPub, noncePub;
     private byte[] ram;
+    private SchnorrSignature schnorrSignature;
 
     /**
      * Invoked during applet installation. Creates an instance of this class. The installation parameters are passed in
@@ -180,6 +178,7 @@ public class KeycardApplet extends Applet {
                 SecP256k1.G, SecP256k1.r, rm);
         signature = new BigNat(order.length(),
                 JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT, rm);
+        schnorrSignature = new SchnorrSignature(secp256k1, rm);
         uid = new byte[UID_LENGTH];
         crypto.random.generateData(uid, (short) 0, UID_LENGTH);
         md = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
@@ -1066,7 +1065,7 @@ public class KeycardApplet extends Applet {
         boolean makeCurrent = false;
         byte derivationSource = (byte) (apduBuffer[OFFSET_P1] & DERIVE_P1_SOURCE_MASK);
 
-        switch((byte) (apduBuffer[OFFSET_P1] & ~DERIVE_P1_SOURCE_MASK)) {
+        switch ((byte) (apduBuffer[OFFSET_P1] & ~DERIVE_P1_SOURCE_MASK)) {
             case SIGN_P1_CURRENT_KEY:
                 derivationSource = DERIVE_P1_SOURCE_CURRENT;
                 break;
@@ -1092,42 +1091,30 @@ public class KeycardApplet extends Applet {
         short pathLen = (short) (len - MessageDigest.LENGTH_SHA_256);
         updateDerivationPath(apduBuffer, MessageDigest.LENGTH_SHA_256, pathLen, derivationSource);
 
+        // Derive the key used for signing
         doDerive(apduBuffer, MessageDigest.LENGTH_SHA_256);
+        // Load the derived secret key (identityPriv) from the derivation output.
         identityPriv.fromByteArray(derivationOutput, (short) 0, Crypto.KEY_SECRET_SIZE);
+
+        // Derive the corresponding public key (identityPub) and place it into the APDU output buffer.
         apduBuffer[SecureChannel.SC_OUT_OFFSET] = TLV_SIGNATURE_TEMPLATE;
-        apduBuffer[(short)(SecureChannel.SC_OUT_OFFSET + 3)] = TLV_PUB_KEY;
-        apduBuffer[(short)(SecureChannel.SC_OUT_OFFSET + 4)] = Crypto.KEY_PUB_SIZE;
-
+        apduBuffer[(short) (SecureChannel.SC_OUT_OFFSET + 3)] = TLV_PUB_KEY;
+        apduBuffer[(short) (SecureChannel.SC_OUT_OFFSET + 4)] = Crypto.KEY_PUB_SIZE;
         secp256k1.derivePublicKey(derivationOutput, (short) 0, apduBuffer, (short) (SecureChannel.SC_OUT_OFFSET + 5));
-        identityPub.setW(apduBuffer, (short)(SecureChannel.SC_OUT_OFFSET + 5), Crypto.KEY_PUB_SIZE);
-        // Generate a random nonce (k value) for this signature
-        crypto.random.generateData(ram, (short) 0, order.length());
-        noncePriv.fromByteArray(ram, (short) 0, order.length());
+        identityPub.setW(apduBuffer, (short) (SecureChannel.SC_OUT_OFFSET + 5), Crypto.KEY_PUB_SIZE);
 
-        // R = k*G (nonce point)
-        noncePub.setW(secp256k1.G, (short) 0, secp256k1.POINT_SIZE);
-        noncePub.multiplication(noncePriv);
-
-        // Hash(R || pubkey || message)
-        md.reset();
-        noncePub.getW(ram, (short) 0);
-        md.update(ram, (short) 0, secp256k1.POINT_SIZE);
-        identityPub.getW(ram, (short) 0);
-        md.update(ram, (short) 0, secp256k1.POINT_SIZE);
-        short hashLen = md.doFinal(
-                apduBuffer, ISO7816.OFFSET_CDATA, (short) 32,  // Input from buf
-                ram, (short) 0  // Output to ram
+        byte[] auxRand = new byte[32];
+        crypto.random.generateData(auxRand, (short) 0, (short) 32);
+        short sigLen = schnorrSignature.sign(
+                apduBuffer, ISO7816.OFFSET_CDATA,
+                derivationOutput, (short) 0,
+                auxRand, (short) 0, (short) 32,
+                apduBuffer, secureChannel.SC_OUT_OFFSET
         );
 
-        // assert hashLen <= order.length()
-        signature.fromByteArray(ram, (short) 0, hashLen);
-        signature.modMult(identityPriv, order);
-        signature.modAdd(noncePriv, order);
-
-        short len_o = order.length();
-        signature.prependZeros(len_o, apduBuffer, (short) 0);
-        apdu.setOutgoingAndSend((short) 0, len_o); // TODO, what is len?
+        apdu.setOutgoingAndSend(SecureChannel.SC_OUT_OFFSET, sigLen);
     }
+
 
     /**
      * Processes the EXPORT KEY command. Requires an open secure channel and the PIN to be verified.
