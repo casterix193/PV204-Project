@@ -7,6 +7,12 @@ import javacard.security.*;
 
 import static javacard.framework.ISO7816.OFFSET_P1;
 
+import java.applet.Applet;
+import java.security.MessageDigest;
+import java.security.Signature;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
+
 /**
  * The applet's main class. All incoming commands a processed by this class.
  */
@@ -147,6 +153,7 @@ public class KeycardApplet extends Applet {
     private ECPoint identityPub, noncePub;
     private byte[] ram;
     private SchnorrSignature schnorrSignature;
+    private SchnorrSignature schnorrSigner;
 
     /**
      * Invoked during applet installation. Creates an instance of this class. The installation parameters are passed in
@@ -371,6 +378,59 @@ public class KeycardApplet extends Applet {
         } else {
             ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         }
+    }
+
+    /**
+    * Process the SIGN command for Schnorr signatures.
+    * 
+    * @param apdu The APDU object
+    */
+    private void processSign(APDU apdu) {
+        byte[] apduBuffer = apdu.getBuffer();
+    
+        // Verify that PIN is validated
+        if (!pin.isValidated()) {
+            ISOException.throwIt(ISO7816.SW_SECURITY_STATUS_NOT_SATISFIED);
+        }
+    
+        // Check if a key is loaded
+        if (!masterPrivate.isInitialized()) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+    
+        // Get the message to sign (should be a 32-byte hash)
+        short dataLength = apdu.setIncomingAndReceive();
+        if (dataLength != 32) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+    
+        // Initialize the Schnorr signature utility if not already done
+        if (schnorrSigner == null) {
+            schnorrSigner = new SchnorrSignature(secp256k1, rm);
+        }
+    
+        // Get private key as byte array
+        byte[] privateKeyBytes = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
+        masterPrivate.getS(privateKeyBytes, (short) 0);
+    
+        // Generate random auxiliary data
+        byte[] auxRand = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
+        crypto.random.generateData(auxRand, (short) 0, (short) 32);
+    
+        // Sign the message
+        byte[] signature = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_DESELECT);
+        short sigLength = schnorrSigner.sign(
+            apduBuffer, ISO7816.OFFSET_CDATA,  // message and offset
+            privateKeyBytes, (short) 0,        // private key and offset
+            auxRand, (short) 0, (short) 32,    // auxiliary random data
+            signature, (short) 0               // output signature buffer
+        );
+    
+        // Copy signature to response buffer
+        Util.arrayCopyNonAtomic(signature, (short) 0, apduBuffer, (short) 0, sigLength);
+    
+        // Send response
+        apdu.setOutgoingAndSend((short) 0, sigLength);
     }
 
     private boolean shouldRespond(APDU apdu) {
