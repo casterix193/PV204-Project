@@ -20,21 +20,21 @@ public class OperationSupport {
     public boolean DEFERRED_INITIALIZATION = false;
 
     public boolean RSA_EXP = true;
-    public boolean RSA_SQ = true;
+    public boolean RSA_SQ = false;
     public boolean RSA_PUB = false;
     public boolean RSA_CHECK_ONE = false;
     public boolean RSA_CHECK_EXP_ONE = false;
-    public boolean RSA_KEY_REFRESH = false;
-    public boolean RSA_PREPEND_ZEROS = false;
+    public boolean RSA_KEY_REFRESH = true;
+    public boolean RSA_PREPEND_ZEROS = true;
     public boolean RSA_EXTRA_MOD = false;
-    public boolean RSA_RESIZE_MOD = true;
+    public boolean RSA_RESIZE_MOD = false;
     public boolean RSA_APPEND_MOD = false;
 
-    public boolean EC_HW_XY = false;
+    public boolean EC_HW_XY = true;
     public boolean EC_HW_X = true;
-    public boolean EC_HW_ADD = false;
-    public boolean EC_SW_DOUBLE = false;
-    public boolean EC_PRECISE_BITLENGTH = true;
+    public boolean EC_HW_ADD = true;
+    public boolean EC_SW_DOUBLE = true;
+    public boolean EC_PRECISE_BITLENGTH = false;
     public boolean EC_SET_COFACTOR = false;
     public boolean EC_GEN = true;
     public boolean EC_HW_X_ECDSA = true;

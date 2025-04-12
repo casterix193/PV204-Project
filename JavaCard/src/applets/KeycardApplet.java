@@ -5,13 +5,8 @@ import applets.jcmathlib.curves.SecP256k1;
 import javacard.framework.*;
 import javacard.security.*;
 
+import static applets.SecureChannel.SC_OUT_OFFSET;
 import static javacard.framework.ISO7816.OFFSET_P1;
-
-import java.applet.Applet;
-import java.security.MessageDigest;
-import java.security.Signature;
-import java.security.interfaces.ECPrivateKey;
-import java.security.interfaces.ECPublicKey;
 
 /**
  * The applet's main class. All incoming commands a processed by this class.
@@ -68,7 +63,7 @@ public class KeycardApplet extends Applet {
 
     static final byte GENERATE_MNEMONIC_P1_CS_MIN = 4;
     static final byte GENERATE_MNEMONIC_P1_CS_MAX = 8;
-    static final byte GENERATE_MNEMONIC_TMP_OFF = SecureChannel.SC_OUT_OFFSET + ((((GENERATE_MNEMONIC_P1_CS_MAX * 32) + GENERATE_MNEMONIC_P1_CS_MAX) / 11) * 2);
+    static final byte GENERATE_MNEMONIC_TMP_OFF = SC_OUT_OFFSET + ((((GENERATE_MNEMONIC_P1_CS_MAX * 32) + GENERATE_MNEMONIC_P1_CS_MAX) / 11) * 2);
 
     static final byte SIGN_P1_CURRENT_KEY = 0x00;
     static final byte SIGN_P1_DERIVE = 0x01;
@@ -153,8 +148,7 @@ public class KeycardApplet extends Applet {
     private ECPoint identityPub, noncePub;
     private byte[] ram;
     private SchnorrSignature schnorrSignature;
-    private SchnorrSignature schnorrSigner;
-
+    private boolean shouldRespond = true;
     /**
      * Invoked during applet installation. Creates an instance of this class. The installation parameters are passed in
      * the given buffer.
@@ -183,8 +177,13 @@ public class KeycardApplet extends Applet {
         rm = new ResourceManager((short) 256);
         secp256k1 = new ECCurve(SecP256k1.p, SecP256k1.a, SecP256k1.b,
                 SecP256k1.G, SecP256k1.r, rm);
+        order = new BigNat((short) secp256k1.r.length,
+                JCSystem.MEMORY_TYPE_PERSISTENT, rm);
         signature = new BigNat(order.length(),
                 JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT, rm);
+        identityPriv = new BigNat(order.length(),
+                JCSystem.MEMORY_TYPE_PERSISTENT, rm);
+        identityPub = new ECPoint(secp256k1);
         schnorrSignature = new SchnorrSignature(secp256k1, rm);
         uid = new byte[UID_LENGTH];
         crypto.random.generateData(uid, (short) 0, UID_LENGTH);
@@ -212,7 +211,7 @@ public class KeycardApplet extends Applet {
 
         data = new byte[(short)(MAX_DATA_LENGTH + 1)];
 
-        register(bArray, (short) (bOffset + 1), bArray[bOffset]);
+        register();
     }
 
     /**
@@ -225,36 +224,22 @@ public class KeycardApplet extends Applet {
     public void process(APDU apdu) throws ISOException {
         // If we have no PIN it means we still have to initialize the applet.
         if (pin == null) {
-            if (secureChannel == null) {
-                secureChannel = new SecureChannel(PAIRING_MAX_CLIENT_COUNT, crypto);
-            }
             processInit(apdu);
             return;
         }
 
         // Since selection can happen not only by a SELECT command, we check for that separately.
-        if (selectingApplet()) {
-            selectApplet(apdu);
-            return;
-        }
+//        if (selectingApplet()) {
+//            selectApplet(apdu);
+//            return;
+//        }
 
         apdu.setIncomingAndReceive();
         byte[] apduBuffer = apdu.getBuffer();
+        shouldRespond = true;
 
         try {
             switch (apduBuffer[ISO7816.OFFSET_INS]) {
-                case SecureChannel.INS_OPEN_SECURE_CHANNEL:
-                    secureChannel.openSecureChannel(apdu);
-                    break;
-                case SecureChannel.INS_MUTUALLY_AUTHENTICATE:
-                    secureChannel.mutuallyAuthenticate(apdu);
-                    break;
-                case SecureChannel.INS_PAIR:
-                    secureChannel.pair(apdu);
-                    break;
-                case SecureChannel.INS_UNPAIR:
-                    unpair(apdu);
-                    break;
                 case INS_GET_STATUS:
                     getStatus(apdu);
                     break;
@@ -305,9 +290,8 @@ public class KeycardApplet extends Applet {
         } catch (Exception e) {
             handleException(apdu, ISO7816.SW_UNKNOWN);
         }
-
-        if (shouldRespond(apdu)) {
-            secureChannel.respond(apdu, (short) 0, ISO7816.SW_NO_ERROR);
+        if(shouldRespond) {
+            apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, (short) 0);
         }
     }
 
@@ -328,14 +312,8 @@ public class KeycardApplet extends Applet {
         byte[] apduBuffer = apdu.getBuffer();
         apdu.setIncomingAndReceive();
 
-        if (selectingApplet()) {
-            apduBuffer[0] = TLV_PUB_KEY;
-            apduBuffer[1] = (byte) secureChannel.copyPublicKey(apduBuffer, (short) 2);
-            apdu.setOutgoingAndSend((short) 0, (short)(apduBuffer[1] + 2));
-        } else if (apduBuffer[ISO7816.OFFSET_INS] == INS_INIT) {
-            secureChannel.oneShotDecrypt(apduBuffer);
-
-            byte defaultLimitsLen = (byte)(PIN_LENGTH + PUK_LENGTH + SecureChannel.SC_SECRET_LENGTH);
+        if (apduBuffer[ISO7816.OFFSET_INS] == INS_INIT) {
+            byte defaultLimitsLen = (byte)(PIN_LENGTH + PUK_LENGTH);
             byte withLimitsLen = (byte) (defaultLimitsLen + 2);
             byte withAltPIN = (byte) (withLimitsLen + 6);
 
@@ -363,8 +341,6 @@ public class KeycardApplet extends Applet {
                 pukLimit = DEFAULT_PUK_MAX_RETRIES;
             }
 
-            secureChannel.initSecureChannel(apduBuffer, (short)(ISO7816.OFFSET_CDATA + PIN_LENGTH + PUK_LENGTH));
-
             mainPIN = new OwnerPIN(pinLimit, PIN_LENGTH);
             mainPIN.update(apduBuffer, ISO7816.OFFSET_CDATA, PIN_LENGTH);
 
@@ -378,59 +354,6 @@ public class KeycardApplet extends Applet {
         } else {
             ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         }
-    }
-
-    /**
-    * Process the SIGN command for Schnorr signatures.
-    * 
-    * @param apdu The APDU object
-    */
-    private void processSign(APDU apdu) {
-        byte[] apduBuffer = apdu.getBuffer();
-    
-        // Verify that PIN is validated
-        if (!pin.isValidated()) {
-            ISOException.throwIt(ISO7816.SW_SECURITY_STATUS_NOT_SATISFIED);
-        }
-    
-        // Check if a key is loaded
-        if (!masterPrivate.isInitialized()) {
-            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-        }
-    
-        // Get the message to sign (should be a 32-byte hash)
-        short dataLength = apdu.setIncomingAndReceive();
-        if (dataLength != 32) {
-            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
-        }
-    
-        // Initialize the Schnorr signature utility if not already done
-        if (schnorrSigner == null) {
-            schnorrSigner = new SchnorrSignature(secp256k1, rm);
-        }
-    
-        // Get private key as byte array
-        byte[] privateKeyBytes = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
-        masterPrivate.getS(privateKeyBytes, (short) 0);
-    
-        // Generate random auxiliary data
-        byte[] auxRand = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
-        crypto.random.generateData(auxRand, (short) 0, (short) 32);
-    
-        // Sign the message
-        byte[] signature = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_DESELECT);
-        short sigLength = schnorrSigner.sign(
-            apduBuffer, ISO7816.OFFSET_CDATA,  // message and offset
-            privateKeyBytes, (short) 0,        // private key and offset
-            auxRand, (short) 0, (short) 32,    // auxiliary random data
-            signature, (short) 0               // output signature buffer
-        );
-    
-        // Copy signature to response buffer
-        Util.arrayCopyNonAtomic(signature, (short) 0, apduBuffer, (short) 0, sigLength);
-    
-        // Send response
-        apdu.setOutgoingAndSend((short) 0, sigLength);
     }
 
     private boolean shouldRespond(APDU apdu) {
@@ -528,9 +451,9 @@ public class KeycardApplet extends Applet {
         short len;
 
         if (apduBuffer[OFFSET_P1] == GET_STATUS_P1_APPLICATION) {
-            len = getApplicationStatus(apduBuffer, SecureChannel.SC_OUT_OFFSET);
+            len = getApplicationStatus(apduBuffer, SC_OUT_OFFSET);
         } else if (apduBuffer[OFFSET_P1] == GET_STATUS_P1_KEY_PATH) {
-            len = getKeyStatus(apduBuffer, SecureChannel.SC_OUT_OFFSET);
+            len = getKeyStatus(apduBuffer, SC_OUT_OFFSET);
         } else {
             ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
             return;
@@ -561,7 +484,7 @@ public class KeycardApplet extends Applet {
         apduBuffer[off++] = 1;
         apduBuffer[off++] = masterPrivate.isInitialized() ? (byte) 0xFF : (byte) 0x00;
 
-        return (short) (off - SecureChannel.SC_OUT_OFFSET);
+        return (short) (off - SC_OUT_OFFSET);
     }
 
     /**
@@ -587,8 +510,8 @@ public class KeycardApplet extends Applet {
      * @param apdu the JCRE-owned APDU object.
      */
     private void verifyPIN(APDU apdu) {
+        byte len = (byte) apdu.getIncomingLength();
         byte[] apduBuffer = apdu.getBuffer();
-        byte len = (byte) secureChannel.preprocessAPDU(apduBuffer);
 
         if (!(len == PIN_LENGTH && allDigits(apduBuffer, ISO7816.OFFSET_CDATA, len))) {
             ISOException.throwIt(ISO7816.SW_WRONG_DATA);
@@ -728,7 +651,7 @@ public class KeycardApplet extends Applet {
 
         short pubLen = masterPublic.getW(apduBuffer, (short) 0);
         crypto.sha256.doFinal(apduBuffer, (short) 0, pubLen, keyUID, (short) 0);
-        Util.arrayCopy(keyUID, (short) 0, apduBuffer, SecureChannel.SC_OUT_OFFSET, KEY_UID_LENGTH);
+        Util.arrayCopy(keyUID, (short) 0, apduBuffer, SC_OUT_OFFSET, KEY_UID_LENGTH);
     }
 
     /**
@@ -979,7 +902,7 @@ public class KeycardApplet extends Applet {
         crypto.sha256.doFinal(apduBuffer, GENERATE_MNEMONIC_TMP_OFF, entLen, apduBuffer, (short)(GENERATE_MNEMONIC_TMP_OFF + entLen));
         entLen += GENERATE_MNEMONIC_TMP_OFF + 1;
 
-        short outOff = SecureChannel.SC_OUT_OFFSET;
+        short outOff = SC_OUT_OFFSET;
         short rShift = 0;
         short vp = 0;
 
@@ -1002,7 +925,7 @@ public class KeycardApplet extends Applet {
             outOff -= 2; // a last spurious 11 bit number will be generated when cs length is less than 6 because 16 - cs >= 11
         }
 
-        secureChannel.respond(apdu, (short) (outOff - SecureChannel.SC_OUT_OFFSET), ISO7816.SW_NO_ERROR);
+        secureChannel.respond(apdu, (short) (outOff - SC_OUT_OFFSET), ISO7816.SW_NO_ERROR);
     }
 
     /**
@@ -1097,7 +1020,6 @@ public class KeycardApplet extends Applet {
      */
     private void generateKey(APDU apdu) {
         byte[] apduBuffer = apdu.getBuffer();
-        secureChannel.preprocessAPDU(apduBuffer);
 
         if (!pin.isValidated()) {
             ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -1107,7 +1029,9 @@ public class KeycardApplet extends Applet {
         crypto.random.generateData(apduBuffer, ISO7816.OFFSET_CDATA, BIP39_SEED_SIZE);
 
         loadSeed(apduBuffer);
-        secureChannel.respond(apdu, KEY_UID_LENGTH, ISO7816.SW_NO_ERROR);
+        Util.setShort(apduBuffer, (short) (SC_OUT_OFFSET + KEY_UID_LENGTH), ISO7816.SW_NO_ERROR);
+        apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, KEY_UID_LENGTH);
+        shouldRespond = false;
     }
 
     /**
@@ -1138,8 +1062,7 @@ public class KeycardApplet extends Applet {
                 ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
                 return;
         }
-
-        short len = secureChannel.preprocessAPDU(apduBuffer);
+        byte len = (byte) apdu.getIncomingLength();
 
         if (len < MessageDigest.LENGTH_SHA_256) {
             ISOException.throwIt(ISO7816.SW_WRONG_DATA);
@@ -1157,11 +1080,10 @@ public class KeycardApplet extends Applet {
         identityPriv.fromByteArray(derivationOutput, (short) 0, Crypto.KEY_SECRET_SIZE);
 
         // Derive the corresponding public key (identityPub) and place it into the APDU output buffer.
-        apduBuffer[SecureChannel.SC_OUT_OFFSET] = TLV_SIGNATURE_TEMPLATE;
-        apduBuffer[(short) (SecureChannel.SC_OUT_OFFSET + 3)] = TLV_PUB_KEY;
-        apduBuffer[(short) (SecureChannel.SC_OUT_OFFSET + 4)] = Crypto.KEY_PUB_SIZE;
-        secp256k1.derivePublicKey(derivationOutput, (short) 0, apduBuffer, (short) (SecureChannel.SC_OUT_OFFSET + 5));
-        identityPub.setW(apduBuffer, (short) (SecureChannel.SC_OUT_OFFSET + 5), Crypto.KEY_PUB_SIZE);
+        byte[] pubKey = new byte[65];
+        secp256k1.derivePublicKey(derivationOutput, (short) 0, pubKey, (short) 0);
+        // copy the first 32 bytes of the public key to the output buffer
+        Util.arrayCopyNonAtomic(pubKey, (short) 1, apduBuffer, SC_OUT_OFFSET, (short) 32);
 
         byte[] auxRand = new byte[32];
         crypto.random.generateData(auxRand, (short) 0, (short) 32);
@@ -1169,10 +1091,11 @@ public class KeycardApplet extends Applet {
                 apduBuffer, ISO7816.OFFSET_CDATA,
                 derivationOutput, (short) 0,
                 auxRand, (short) 0, (short) 32,
-                apduBuffer, secureChannel.SC_OUT_OFFSET
+                apduBuffer, (short) (SC_OUT_OFFSET + 32)
         );
 
-        apdu.setOutgoingAndSend(SecureChannel.SC_OUT_OFFSET, sigLen);
+        apdu.setOutgoingAndSend(SC_OUT_OFFSET, (short) (sigLen + 32));
+        shouldRespond = false;
     }
 
 
@@ -1237,7 +1160,7 @@ public class KeycardApplet extends Applet {
 
         doDerive(apduBuffer, (short) 0);
 
-        short off = SecureChannel.SC_OUT_OFFSET;
+        short off = SC_OUT_OFFSET;
 
         apduBuffer[off++] = TLV_KEY_TEMPLATE;
         off++;
@@ -1270,8 +1193,8 @@ public class KeycardApplet extends Applet {
             off += len;
         }
 
-        len = (short) (off - SecureChannel.SC_OUT_OFFSET);
-        apduBuffer[(SecureChannel.SC_OUT_OFFSET + 1)] = (byte) (len - 2);
+        len = (short) (off - SC_OUT_OFFSET);
+        apduBuffer[(SC_OUT_OFFSET + 1)] = (byte) (len - 2);
 
         if (makeCurrent) {
             commitTmpPath();
@@ -1302,12 +1225,12 @@ public class KeycardApplet extends Applet {
         }
 
         short outLen = Util.makeShort((byte) 0x00, dst[0]);
-        Util.arrayCopyNonAtomic(dst, (short) 1, apduBuffer, SecureChannel.SC_OUT_OFFSET, outLen);
+        Util.arrayCopyNonAtomic(dst, (short) 1, apduBuffer, SC_OUT_OFFSET, outLen);
 
         if (secureChannel.isOpen()) {
             secureChannel.respond(apdu, outLen, ISO7816.SW_NO_ERROR);
         } else {
-            apdu.setOutgoingAndSend(SecureChannel.SC_OUT_OFFSET, outLen);
+            apdu.setOutgoingAndSend(SC_OUT_OFFSET, outLen);
         }
     }
 

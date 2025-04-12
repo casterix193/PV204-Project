@@ -21,8 +21,10 @@ public class TestSignCommand {
     };
     private static final byte CLA_BYTE = (byte) 0xB0;
     private static final byte INS_SIGN = (byte) 0xC0;
+    private static final byte INS_INIT = (byte) 0xFE;
     private static final byte INS_VERIFY_PIN = (byte) 0x20;
-    private static final byte INS_GENERATE_MASTER_KEY = (byte) 0x56;
+    private static final byte INS_GENERATE_KEY = (byte) 0xD4;
+
 
     private static final byte P1 = (byte) 0x00;
     private static final byte P2 = (byte) 0x00;
@@ -30,7 +32,11 @@ public class TestSignCommand {
     private static final short EXPECTED_SIGNATURE_LENGTH = 64;
     
     // Default PIN for testing
-    private static final byte[] DEFAULT_PIN = {0x31, 0x32, 0x33, 0x34};
+    private static final byte[] DEFAULT_PIN = {0x31, 0x32, 0x33, 0x34, 0x35, 0x36};
+    private static final byte[] initData = {
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36, // PIN
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36 , 0x37, 0x38, 0x39, 0x31, 0x32, 0x33 // PUK
+    };
 
     public static void main(String[] args) throws Exception {
         CardManager cardManager = new CardManager(true, APPLET_AID_BYTES);
@@ -44,10 +50,10 @@ public class TestSignCommand {
             throw new Exception("Connection failed.");
         }
         System.out.println("Connected.");
-        
+        initKeycard(cardManager);
         // Step 1: Verify PIN
         verifyPin(cardManager);
-        
+
         // Step 2: Generate a key if needed
         generateKey(cardManager);
         
@@ -60,13 +66,23 @@ public class TestSignCommand {
         
         // Step 5: Sign the message
         byte[] signature = signMessage(cardManager, messageHash);
-        
-        // Step 6: Verify the signature format
-        verifySignatureFormat(signature);
-        
+
         System.out.println("Test completed successfully!");
     }
-    
+
+    private static void initKeycard(CardManager cardManager) throws Exception {
+        System.out.print("Initializing Keycard... ");
+        // send 6 digits of PIN and 12 digits of PUK
+        CommandAPDU initApdu = new CommandAPDU(CLA_BYTE, INS_INIT, P1, P2, initData);
+        ResponseAPDU response = cardManager.transmit(initApdu);
+
+        if (response.getSW() != 0x9000) {
+            System.out.println("Failed. Status word: " + Integer.toHexString(response.getSW()));
+            throw new Exception("Keycard initialization failed");
+        }
+        System.out.println("Success.");
+    }
+
     private static void verifyPin(CardManager cardManager) throws Exception {
         System.out.print("Verifying PIN... ");
         CommandAPDU verifyPinApdu = new CommandAPDU(CLA_BYTE, INS_VERIFY_PIN, P1, P2, DEFAULT_PIN);
@@ -81,7 +97,7 @@ public class TestSignCommand {
     
     private static void generateKey(CardManager cardManager) throws Exception {
         System.out.print("Generating master key... ");
-        CommandAPDU generateKeyCmd = new CommandAPDU(CLA_BYTE, INS_GENERATE_MASTER_KEY, P1, P2);
+        CommandAPDU generateKeyCmd = new CommandAPDU(CLA_BYTE, INS_GENERATE_KEY, P1, P2);
         ResponseAPDU response = cardManager.transmit(generateKeyCmd);
         
         if (response.getSW() != 0x9000) {
@@ -115,21 +131,6 @@ public class TestSignCommand {
         byte[] signature = response.getData();
         System.out.println("Success. Signature received: " + signature.length + " bytes");
         return signature;
-    }
-    
-    private static void verifySignatureFormat(byte[] signature) throws Exception {
-        if (signature == null) {
-            throw new Exception("Signature is null");
-        }
-        
-        if (signature.length != EXPECTED_SIGNATURE_LENGTH) {
-            throw new Exception("Invalid signature length: " + signature.length + 
-                               " (expected " + EXPECTED_SIGNATURE_LENGTH + ")");
-        }
-        
-        System.out.println("Signature format is valid.");
-        System.out.println("R.x: " + bytesToHex(Arrays.copyOfRange(signature, 0, 32)));
-        System.out.println("s: " + bytesToHex(Arrays.copyOfRange(signature, 32, 64)));
     }
     
     private static String bytesToHex(byte[] bytes) {

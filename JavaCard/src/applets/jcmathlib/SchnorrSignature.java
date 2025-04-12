@@ -59,7 +59,7 @@ public class SchnorrSignature {
         this.sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
 
         // Allocate buffers
-        this.tmpBuffer = new byte[128]; // Larger buffer for various operations
+        this.tmpBuffer = new byte[256]; // Larger buffer for various operations
         this.hashBuffer = new byte[32];
         this.nonceBuffer = new byte[32];
         this.pointBuffer = new byte[65]; // Uncompressed point format
@@ -289,7 +289,6 @@ public class SchnorrSignature {
 
         // Compute s = (k + e * secKey) mod n
         BigNat s = new BigNat((short) 32, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-
         // Compute e * secKey mod n
         e.modMult(secKeyBN, secp256k1OrderN);
 
